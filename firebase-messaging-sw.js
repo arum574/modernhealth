@@ -7,10 +7,10 @@ importScripts('https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js
 importScripts('https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging-compat.js');
 
 firebase.initializeApp({
-  apiKey: 'REPLACE_WITH_FLUTTERFIRE_CONFIGURE_OUTPUT',
-  appId: 'REPLACE_WITH_FLUTTERFIRE_CONFIGURE_OUTPUT',
-  messagingSenderId: 'REPLACE_WITH_FLUTTERFIRE_CONFIGURE_OUTPUT',
-  projectId: 'REPLACE_WITH_FLUTTERFIRE_CONFIGURE_OUTPUT',
+  apiKey: 'AIzaSyDF5rzxPlvGBkkWoxVKQGA_nB_WivO4QsI',
+  appId: '1:395370344807:web:c57cd510fa6f2de56c3fc2',
+  messagingSenderId: '395370344807',
+  projectId: 'modernhealth-82bf4',
 });
 
 firebase.messaging();
