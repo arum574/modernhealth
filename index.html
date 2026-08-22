@@ -51,6 +51,28 @@
     @keyframes app-loading-spin {
       to { transform: rotate(360deg); }
     }
+
+    /*
+      Confirmed (2026-08-21): freezing only happens in standalone
+      Home-Screen mode, never in a normal Safari tab on the same device
+      with the same app. This is a known WKWebView quirk, not a Flutter
+      or CanvasKit bug — standalone mode uses a different underlying
+      container than a browser tab, and when a page has no real
+      browser-level scrollable content (exactly Flutter's case: one
+      fixed-size canvas filling the viewport, with all real scrolling
+      handled internally by the Dart widget tree instead of the
+      browser), WKWebView's own internal scroll-view/gesture-recognizer
+      setup can intermittently fail to hand touches through to the page
+      at all. `html`/`body` are given a hair of real scrollable height
+      (100.3%) so the browser always considers the page "genuinely
+      scrollable," which is the standard, widely-documented mitigation
+      for this class of bug. It's imperceptible — Flutter's own canvas
+      still fills the exact viewport and handles all visible scrolling
+      itself; this just satisfies WKWebView's internal bookkeeping.
+    */
+    html, body {
+      height: 100.3%;
+    }
   </style>
 </head>
 <body>
@@ -60,6 +82,14 @@
     window.addEventListener('flutter-first-frame', function () {
       var shield = document.getElementById('app-loading-shield');
       if (shield) shield.remove();
+    });
+    // Nudges WKWebView's internal scroll state on load — the classic,
+    // long-documented companion to the CSS fix above for this exact
+    // class of standalone-mode touch-delivery bug. Harmless everywhere
+    // else (scrolling to (0, 1) on a page that's already effectively
+    // non-scrolling is imperceptible).
+    window.addEventListener('load', function () {
+      window.scrollTo(0, 1);
     });
   </script>
 </body>
