@@ -91,6 +91,54 @@
     window.addEventListener('load', function () {
       window.scrollTo(0, 1);
     });
+
+    // Pointer watchdog (2026-08-22): a touch-debug-log capture caught a
+    // `pointerdown` with no matching `pointerup`/`pointercancel` ever
+    // logged, in the same window where nearby taps (Log workout, Swap,
+    // the swap sheet's own list items) went silent for ~10s while the
+    // bottom nav kept firing normally the whole time — then everything
+    // recovered right after an unrelated tap forced a rebuild. That
+    // shape (one dead pointer blocking others, cleared only by a
+    // rebuild) points at a lost pointerup: WKWebView occasionally fails
+    // to deliver the terminating event for a touch (a known gap in this
+    // exact container, same family as the scroll-delivery bug fixed
+    // above), and Flutter's gesture arena then waits forever on that
+    // pointer, holding up sibling recognizers — including ones for
+    // buttons that were never touched. This can't be fixed from the
+    // Dart side since the browser never told the engine the touch
+    // ended. Instead, track every pointerdown here at the DOM level; if
+    // its up/cancel hasn't arrived within 6s (comfortably longer than
+    // any real tap or drag/scroll gesture in this app), synthesize a
+    // pointercancel for it so Flutter's engine sees the gesture end and
+    // releases whatever it was holding, instead of staying stuck
+    // indefinitely.
+    (function () {
+      var pending = new Map();
+      function onDown(event) {
+        var pointerId = event.pointerId;
+        var target = event.target;
+        pending.set(pointerId, true);
+        setTimeout(function () {
+          if (!pending.has(pointerId)) return;
+          pending.delete(pointerId);
+          try {
+            target.dispatchEvent(new PointerEvent('pointercancel', {
+              pointerId: pointerId,
+              bubbles: true,
+              cancelable: true,
+            }));
+          } catch (err) {
+            // Best-effort recovery only — never let this throw.
+          }
+        }, 6000);
+      }
+      function onUpOrCancel(event) {
+        pending.delete(event.pointerId);
+      }
+      window.addEventListener('pointerdown', onDown, true);
+      window.addEventListener('pointerup', onUpOrCancel, true);
+      window.addEventListener('pointercancel', onUpOrCancel, true);
+    })();
   </script>
 </body>
 </html>
