@@ -6,11 +6,32 @@
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="Daily workout recommendations from your recovery data.">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!--
+    `viewport-fit=cover` and `black-translucent` are dropped together
+    (2026-08-23) as the confirmed cause of the touch bug.
+
+    A device capture measured it outright: whenever `window.scrollY` was
+    59, the browser's own `clientY` for a touch and the coordinate Flutter
+    hit-tested with differed by exactly 59px, with
+    `visualViewport.offsetTop` reading 59 too; whenever scrollY was 0 they
+    matched to the pixel. 59px is exactly the top safe-area inset on a
+    Dynamic Island iPhone — and this pair is what puts it there.
+    `viewport-fit=cover` extends the layout viewport into the safe areas,
+    and `black-translucent` puts the page *under* the status bar rather
+    than below it. In standalone mode that lets the layout viewport and
+    the visual viewport sit 59px apart, so a finger landing on a button
+    is hit-tested 59px away from it and finds nothing — which is why taps
+    registered as clean touches while no button ever fired.
+
+    `black` keeps the dark status bar this dark app wants, but the page
+    starts *below* it instead of underneath, so the two viewports stay
+    aligned and there is no inset to diverge by.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <!-- iOS "Add to Home Screen" support -->
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Adaptive Fitness">
   <link rel="apple-touch-icon" href="icons/Icon-180.png">
 
@@ -108,13 +129,19 @@
     // agree exactly, it's killed and the problem is that WKWebView
     // stopped delivering to the canvas at all. Capture phase, passive,
     // so this only observes and never interferes with the real gesture.
+    // Must listen on `pointerdown`, not `touchstart`: Flutter's own
+    // handler is a pointerdown listener, and browsers fire pointerdown
+    // BEFORE touchstart. Reading a touchstart-populated value from
+    // Flutter's pointerdown therefore returned the *previous* touch --
+    // an off-by-one that made the first capture read as nonsense
+    // coordinates until the pattern (each `raw` matching the prior tap)
+    // gave it away. Capture phase so this still runs before Flutter's
+    // own listener on the same event.
     window.__lastRawTouch = null;
-    window.addEventListener('touchstart', function (e) {
-      var t = e.changedTouches[0];
-      if (!t) return;
+    window.addEventListener('pointerdown', function (e) {
       window.__lastRawTouch = {
-        x: Math.round(t.clientX),
-        y: Math.round(t.clientY),
+        x: Math.round(e.clientX),
+        y: Math.round(e.clientY),
         sy: Math.round(window.scrollY || 0),
         vvTop: window.visualViewport ? Math.round(window.visualViewport.offsetTop) : -1,
         vvH: window.visualViewport ? Math.round(window.visualViewport.height) : -1,
@@ -126,14 +153,31 @@
       var t = window.__lastRawTouch;
       if (!t) return 'raw=none';
       return 'raw=' + t.x + ',' + t.y + ' sy=' + t.sy +
-             ' vvTop=' + t.vvTop + ' vvH=' + t.vvH + ' ih=' + t.ih;
+             ' vvTop=' + t.vvTop + ' vvH=' + t.vvH + ' ih=' + t.ih +
+             ' resets=' + (window.__scrollResets || 0);
     };
 
-    // Any page scroll at all is now a bug worth seeing (the CSS above
-    // makes the page unscrollable) — it would mean the layout/visual
-    // viewport split this is meant to prevent is happening anyway.
+    // The CSS lock alone proved insufficient: a capture showed
+    // window.scrollY sitting at 59 anyway, which is precisely when the
+    // browser's touch coordinates and Flutter's diverged. iOS scrolls the
+    // window itself to reveal a focused input regardless of
+    // overflow:hidden, and that scroll is never wanted here — Flutter
+    // handles all real scrolling internally, so any window scroll is
+    // pure desync with nothing gained. Force it straight back to 0 and
+    // count how often that was needed.
     window.addEventListener('scroll', function () {
       window.__sawScroll = (window.__sawScroll || 0) + 1;
+      if ((window.scrollY || 0) !== 0 || (window.scrollX || 0) !== 0) {
+        window.__scrollResets = (window.__scrollResets || 0) + 1;
+        window.scrollTo(0, 0);
+      }
+    }, { passive: true });
+
+    // Focusing a text field is the usual trigger for that scroll, and it
+    // happens after the keyboard animates, so one reset on the scroll
+    // event alone can land too early.
+    window.addEventListener('focusin', function () {
+      setTimeout(function () { window.scrollTo(0, 0); }, 300);
     }, { passive: true });
 
     /*
