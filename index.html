@@ -53,25 +53,42 @@
     }
 
     /*
-      Confirmed (2026-08-21): freezing only happens in standalone
-      Home-Screen mode, never in a normal Safari tab on the same device
-      with the same app. This is a known WKWebView quirk, not a Flutter
-      or CanvasKit bug — standalone mode uses a different underlying
-      container than a browser tab, and when a page has no real
-      browser-level scrollable content (exactly Flutter's case: one
-      fixed-size canvas filling the viewport, with all real scrolling
-      handled internally by the Dart widget tree instead of the
-      browser), WKWebView's own internal scroll-view/gesture-recognizer
-      setup can intermittently fail to hand touches through to the page
-      at all. `html`/`body` are given a hair of real scrollable height
-      (100.3%) so the browser always considers the page "genuinely
-      scrollable," which is the standard, widely-documented mitigation
-      for this class of bug. It's imperceptible — Flutter's own canvas
-      still fills the exact viewport and handles all visible scrolling
-      itself; this just satisfies WKWebView's internal bookkeeping.
+      Viewport lock (2026-08-23), replacing the previous `height: 100.3%`
+      + `scrollTo(0, 1)` pair.
+
+      That earlier pair was the standard mitigation for a *different*
+      WKWebView bug (a page with no scrollable content not receiving
+      touches at all), added when the evidence pointed there. It's now a
+      prime suspect for the remaining symptom instead. Sandbox testing
+      (43/43 taps fired across cancelled pointers, orphaned pointers,
+      drag-dismissed sheets, scroll steals and rapid taps) ruled out
+      every Dart-side gesture explanation, which forced a re-read of the
+      device captures — and there the taps that FIRED sit at y≈363-381
+      while the taps that died sit at y≈411-443, consistently ~40-70px
+      lower. That's a coordinate-space offset roughly the size of an iOS
+      safe-area inset: the finger lands where the button is *drawn*, but
+      Flutter hit-tests a point ~50px away and finds nothing. Deliberately
+      giving the page 0.3% of scrollable height and then scrolling into
+      it is exactly the kind of thing that lets the layout viewport and
+      the visual viewport drift apart in standalone mode, which is how
+      that offset would arise.
+
+      So: make the page genuinely unscrollable instead of deliberately
+      slightly scrollable. `position: fixed` + `overflow: hidden` pins
+      the layout viewport to the visual viewport so the two can't
+      diverge. Flutter's canvas fills it exactly and still handles all
+      real scrolling internally, as before.
     */
     html, body {
-      height: 100.3%;
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      position: fixed;
+      top: 0;
+      left: 0;
+      overscroll-behavior: none;
     }
   </style>
 </head>
@@ -83,14 +100,122 @@
       var shield = document.getElementById('app-loading-shield');
       if (shield) shield.remove();
     });
-    // Nudges WKWebView's internal scroll state on load — the classic,
-    // long-documented companion to the CSS fix above for this exact
-    // class of standalone-mode touch-delivery bug. Harmless everywhere
-    // else (scrolling to (0, 1) on a page that's already effectively
-    // non-scrolling is imperceptible).
-    window.addEventListener('load', function () {
-      window.scrollTo(0, 1);
-    });
+    // Records where the BROWSER thinks each touch landed, so it can be
+    // compared against where FLUTTER thinks it landed (logged from Dart
+    // in debug/touch_debug_overlay.dart). If the two disagree during a
+    // dead-tap window, the coordinate-desync theory is confirmed
+    // outright and the offset is measured rather than inferred; if they
+    // agree exactly, it's killed and the problem is that WKWebView
+    // stopped delivering to the canvas at all. Capture phase, passive,
+    // so this only observes and never interferes with the real gesture.
+    window.__lastRawTouch = null;
+    window.addEventListener('touchstart', function (e) {
+      var t = e.changedTouches[0];
+      if (!t) return;
+      window.__lastRawTouch = {
+        x: Math.round(t.clientX),
+        y: Math.round(t.clientY),
+        sy: Math.round(window.scrollY || 0),
+        vvTop: window.visualViewport ? Math.round(window.visualViewport.offsetTop) : -1,
+        vvH: window.visualViewport ? Math.round(window.visualViewport.height) : -1,
+        ih: window.innerHeight
+      };
+    }, { capture: true, passive: true });
+
+    window.__rawTouchInfo = function () {
+      var t = window.__lastRawTouch;
+      if (!t) return 'raw=none';
+      return 'raw=' + t.x + ',' + t.y + ' sy=' + t.sy +
+             ' vvTop=' + t.vvTop + ' vvH=' + t.vvH + ' ih=' + t.ih;
+    };
+
+    // Any page scroll at all is now a bug worth seeing (the CSS above
+    // makes the page unscrollable) — it would mean the layout/visual
+    // viewport split this is meant to prevent is happening anyway.
+    window.addEventListener('scroll', function () {
+      window.__sawScroll = (window.__sawScroll || 0) + 1;
+    }, { passive: true });
+
+    /*
+      Background-activity probes. Firestore holds a live connection open
+      for as long as the app is running, and its traffic, the service
+      worker, and push registration all run without the user doing
+      anything — so "a background call wedged the UI" is a real
+      candidate, not a hunch. JS is single-threaded: anything that
+      occupies the main thread also delays Flutter's frame production and
+      its hit-testing. These counters make that visible instead of
+      assumed, and are read back into the touch log from Dart.
+
+      Deliberately counters and a rolling recent-list, not a log line per
+      request — Firestore is chatty, and logging every message would
+      itself become main-thread load and drown the touch events this is
+      meant to sit alongside.
+    */
+    window.__net = { inflight: 0, total: 0, slow: 0, recent: [], longtasks: 0, longtaskMs: 0 };
+
+    (function () {
+      function note(kind, url, ms, failed) {
+        var n = window.__net;
+        n.total++;
+        if (ms >= 1000) n.slow++;
+        var short = String(url).replace(/^https?:\/\//, '').slice(0, 48);
+        n.recent.push(kind + ' ' + short + ' ' + Math.round(ms) + 'ms' + (failed ? ' FAIL' : ''));
+        if (n.recent.length > 12) n.recent.shift();
+      }
+
+      var origFetch = window.fetch;
+      if (origFetch) {
+        window.fetch = function () {
+          var url = arguments[0] && arguments[0].url ? arguments[0].url : arguments[0];
+          var t0 = performance.now();
+          window.__net.inflight++;
+          return origFetch.apply(this, arguments).then(function (r) {
+            window.__net.inflight--;
+            note('fetch', url, performance.now() - t0, !r.ok);
+            return r;
+          }, function (e) {
+            window.__net.inflight--;
+            note('fetch', url, performance.now() - t0, true);
+            throw e;
+          });
+        };
+      }
+
+      var OrigXHR = window.XMLHttpRequest;
+      if (OrigXHR) {
+        var origOpen = OrigXHR.prototype.open;
+        var origSend = OrigXHR.prototype.send;
+        OrigXHR.prototype.open = function (m, u) { this.__u = u; return origOpen.apply(this, arguments); };
+        OrigXHR.prototype.send = function () {
+          var self = this, t0 = performance.now();
+          window.__net.inflight++;
+          this.addEventListener('loadend', function () {
+            window.__net.inflight--;
+            note('xhr', self.__u, performance.now() - t0, self.status === 0 || self.status >= 400);
+          });
+          return origSend.apply(this, arguments);
+        };
+      }
+
+      // Anything holding the main thread >50ms is directly capable of
+      // delaying a tap's delivery and the frame it would hit-test against.
+      try {
+        new PerformanceObserver(function (list) {
+          list.getEntries().forEach(function (e) {
+            window.__net.longtasks++;
+            window.__net.longtaskMs += Math.round(e.duration);
+          });
+        }).observe({ entryTypes: ['longtask'] });
+      } catch (err) { /* not supported in this browser; counters stay 0 */ }
+    })();
+
+    window.__netInfo = function () {
+      var n = window.__net;
+      return 'net inflight=' + n.inflight + ' total=' + n.total + ' slow=' + n.slow +
+             ' longtasks=' + n.longtasks + '/' + n.longtaskMs + 'ms' +
+             ' scrolls=' + (window.__sawScroll || 0);
+    };
+    window.__netRecent = function () { return (window.__net.recent || []).join(' | '); };
 
     // Pointer watchdog (2026-08-22): a touch-debug-log capture caught a
     // `pointerdown` with no matching `pointerup`/`pointercancel` ever
