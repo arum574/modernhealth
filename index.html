@@ -121,6 +121,44 @@
       var shield = document.getElementById('app-loading-shield');
       if (shield) shield.remove();
     });
+
+    /*
+      Service-worker freshness (2026-08-24). A fix that had been deployed
+      for over two hours was demonstrably not running on the device: log
+      lines the new code writes unconditionally were absent from a
+      capture. The service worker was serving stale JavaScript, which
+      also casts doubt on earlier "still broken" reports — some of them
+      may never have been running the code being tested.
+
+      An installed iOS PWA is the worst case for this: it can go a long
+      time without the worker checking for a new version. So ask
+      explicitly on every load, and when a new worker takes control,
+      reload once so the fresh assets are actually used.
+
+      The once-guard matters. An earlier auto-reload-on-resume mechanism
+      in this project caused the very freezes it was meant to fix and had
+      to be removed entirely (see above), so this deliberately fires at
+      most once per page session, only on a genuine controller change,
+      and never on a timer or lifecycle event.
+    */
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.update(); });
+      }).catch(function () { /* nothing to update */ });
+
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        // `controller` is null on the very first registration, which is
+        // not an update and must not trigger a reload.
+        if (!navigator.serviceWorker.controller) return;
+        try {
+          if (sessionStorage.getItem('sw-reloaded') === '1') return;
+          sessionStorage.setItem('sw-reloaded', '1');
+        } catch (e) {
+          return; // storage blocked: skip rather than risk a reload loop
+        }
+        window.location.reload();
+      });
+    }
     // Records where the BROWSER thinks each touch landed, so it can be
     // compared against where FLUTTER thinks it landed (logged from Dart
     // in debug/touch_debug_overlay.dart). If the two disagree during a
